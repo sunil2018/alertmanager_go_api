@@ -2,6 +2,7 @@ package ruleengine
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -17,19 +18,23 @@ type Rule struct {
 
 // RulesGroup represents a group of rules.
 type RulesGroup struct {
-	Condition string        `json:"condition"`
+	Condition string        `json:"combinator"`
 	Rules     []interface{} `json:"rules"`
 }
 
 // EvaluateRule evaluates a single rule against the provided data.
 func EvaluateRule(data map[string]interface{}, rule Rule) bool {	
+
 	fieldValue, ok := data[rule.Field]
+	fmt.Println("I am here in Evaluvate Rule" , fieldValue ,ok,  rule.Field)
+
 	if !ok {
 		return false
 	}
-	
+
 	switch rule.Type {
 	case "string":
+
 		return evaluateStringRule(fieldValue.(string), rule ,  data)
 	case "integer":
 		return evaluateIntegerRule(fieldValue.(float64), rule ) // JSON numbers are decoded as float64
@@ -48,6 +53,7 @@ func evaluateStringRule(fieldValue string, rule Rule, data map[string]interface{
 	case "!":
 		return fieldValue != value
 	case "contains":
+		
 		return strings.Contains(fieldValue, value)
 	case "not_contains":
 		return !strings.Contains(fieldValue, value)
@@ -110,23 +116,23 @@ func evaluateDateRule(fieldValue string, rule Rule) bool {
 
 // EvaluateRulesGroup evaluates a group of rules against the provided data.
 func EvaluateRulesGroup(data map[string]interface{}, group RulesGroup) bool {
-	result := group.Condition == "AND"
+
+	result := group.Condition == "and"
 	for _, ruleInterface := range group.Rules {
 		switch rule := ruleInterface.(type) {
 		case map[string]interface{}:
 			var r Rule
 			ruleBytes, _ := json.Marshal(rule)
 			json.Unmarshal(ruleBytes, &r)
-			if group.Condition == "AND" {
-				
+			if group.Condition == "and" {
 				result = result && EvaluateRule(data, r)
-			} else if group.Condition == "OR" {
+			} else if group.Condition == "or" {
 				result = result || EvaluateRule(data, r)
 			}
 		case RulesGroup:
-			if group.Condition == "AND" {
+			if group.Condition == "and" {
 				result = result && EvaluateRulesGroup(data, rule)
-			} else if group.Condition == "OR" {
+			} else if group.Condition == "or" {
 				result = result || EvaluateRulesGroup(data, rule)
 			}
 		}

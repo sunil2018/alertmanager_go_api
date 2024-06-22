@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 
 	"github.com/mitchellh/mapstructure"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"golang.org/x/exp/slices"
@@ -21,10 +24,13 @@ import (
 	"alertmanager/models"
 	"alertmanager/ruleengine"
 	"alertmanager/utilities"
+	"text/template"
+
+	"golang.org/x/exp/maps"
 )
 
 const mongouri = "mongodb://localhost:27017/api"
-const mongodatabase = "myapp_development"
+const mongodatabase = "spog_development"
 const mongocollection = "alerts"
 
 
@@ -155,8 +161,7 @@ func Handler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Client )
 			"alertid":     apiAlertData["alertId"].(string) ,
 		}
 
-		var existingEvent models.DbAlert
-		existingEvent = models.DbAlert{}
+		existingEvent := models.DbAlert{}
 		
 		opts := options.FindOne()
 		err1 := alertCollection.FindOne(context.TODO(), filter, opts).Decode(&existingEvent)
@@ -171,7 +176,9 @@ func Handler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Client )
 					return
 				}
 				// Create a alert in DB
+				
 				newAlert := models.DbAlert{
+					ID: 				primitive.ObjectID{},
 					Entity:				apiAlertData["entity"].(string),
 					AlertFirstTime:		models.CustomTime{Time: parsedTime},
 					AlertLastTime:		models.CustomTime{},
@@ -187,21 +194,32 @@ func Handler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Client )
 					AlertPriority:		"NORMAL",
 					IpAddress:			apiAlertData["ipAddress"].(string),
 					AlertCount:			1,
+					AdditionalDetails:	make(map[string]interface{}),
+					Grouped: 			false ,	
+					Parent:				false,
 				}
 
 
 				// Add additional Tags
 				//fmt.Println("The object before addTags is " , newAlert )
 				addTags(apiAlertData, &newAlert)
-				//fmt.Println("The object after addTags is " , newAlert )
+				fmt.Println("The object after addTags is " , newAlert )
 				processAlertRules( &newAlert , mongoClient)
+				processTagRules( &newAlert , mongoClient)
 
-				_, inserterr := alertCollection.InsertOne(context.TODO(), newAlert)
+				insertResult , inserterr := alertCollection.InsertOne(context.TODO(), newAlert)
 
 				if inserterr != nil {
 					fmt.Println("Insert Error")
 					log.Fatal(inserterr)
 				}
+
+				fmt.Println("The insert result is ", *insertResult)
+				newAlert.ID = insertResult.InsertedID.(primitive.ObjectID)
+
+				// Now do the Notification processing rules
+				processGrouping(&newAlert , mongoClient)
+				processNotifyRules( &newAlert , mongoClient)
 
 				alertjsonData, err := json.Marshal(newAlert)
 				if err != nil {
@@ -289,7 +307,7 @@ func processAlertRules(newAlert *models.DbAlert, mongoClient *mongo.Client) bool
     }
 
 	for _, alertRule   := range alertRules {
-		// fmt.Println("Rule is ", alertRule.RuleObject)
+		fmt.Println("Rule is ", alertRule.RuleObject)
 		err := json.Unmarshal([]byte(alertRule.RuleObject), &rulesGroup)
 		if err != nil {
 			fmt.Println("Error in rule evaluation ", err)
@@ -299,10 +317,14 @@ func processAlertRules(newAlert *models.DbAlert, mongoClient *mongo.Client) bool
 		if err1 != nil {
 			fmt.Println("ERROR : Unable to convert struct to map")
 		}
-		//fmt.Println("THE ALERT MAP IS ", alertMap)
+		fmt.Println("THE ALERT MAP IS ", alertMap)
 		res := ruleengine.EvaluateRulesGroup(alertMap, rulesGroup)
-	
+		fmt.Printf("The Alert rule %v MATCH is %v \n", alertRule.RuleName , res)
 		if res {
+			if len(alertRule.SetField) == 0 {
+				fmt.Println("The Set feild is empty. Skipping")
+				continue
+			}
 			// Do the action specified in the rule
 			v := reflect.ValueOf(newAlert).Elem()
 			field := v.FieldByName(alertRule.SetField)
@@ -313,13 +335,379 @@ func processAlertRules(newAlert *models.DbAlert, mongoClient *mongo.Client) bool
 			fieldValue := reflect.ValueOf(alertRule.SetValue)
 			field.Set(fieldValue)
 		}
-		//fmt.Println("The MATCH is ", res)
+		fmt.Println("The MATCH is ", res)
 	}
 	return true
 }
 
-func IsValidJSON(str string) bool {
-    var js json.RawMessage
-    return json.Unmarshal([]byte(str), &js) == nil
+func processTagRules(newAlert *models.DbAlert, mongoClient *mongo.Client) bool {
+	var rulesGroup ruleengine.RulesGroup
+	tagRulesCollection := mongoClient.Database(mongodatabase).Collection("tagrules")
+
+	cursor, err := tagRulesCollection.Find(context.TODO(), bson.D{})
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer cursor.Close(context.TODO())
+
+	var tagRules []models.DbTagRule
+	if err = cursor.All(context.TODO(), &tagRules); err != nil {
+        log.Fatal(err)
+    }
+
+	for _, tagRule   := range tagRules {
+		fmt.Println("Rule is ", tagRule.RuleObject)
+		err := json.Unmarshal([]byte(tagRule.RuleObject), &rulesGroup)
+		if err != nil {
+			fmt.Println("Error in rule evaluation ", err)
+		}
+		var alertMap map[string]interface{}
+		err1 := mapstructure.Decode(newAlert, &alertMap)
+		if err1 != nil {
+			fmt.Println("ERROR : Unable to convert struct to map")
+		}
+		fmt.Println("THE ALERT MAP IS ", alertMap)
+		res := ruleengine.EvaluateRulesGroup(alertMap, rulesGroup)
+		fmt.Printf("The Tag rule %v MATCH is %v \n", tagRule.RuleName , res)
+		if res {
+			if len(tagRule.TagValue) != 0 {
+				fmt.Println("The Tag Value is NOT empty. setting tag ")
+				newAlert.AdditionalDetails[tagRule.TagName] = tagRule.TagValue
+				continue
+			}
+			if len(tagRule.FieldExtraction) != 0 {
+				pattern := tagRule.FieldExtraction
+				re, err := regexp.Compile(pattern)
+				if err != nil {
+					fmt.Println("Error compiling regex:", err)
+					return false
+				}
+				// Do the action specified in the rule
+				v := reflect.ValueOf(newAlert).Elem()
+				field := v.FieldByName(tagRule.FieldName)
+				if !field.IsValid() ||  !field.CanSet()  {
+					fmt.Println("ERROR : The struct element is un settable")
+					continue
+				}
+
+				if re.MatchString(field.String()) {
+					// Extract the submatches
+					matches := re.FindStringSubmatch(field.String())
+					if len(matches) > 0 {
+
+						fmt.Printf("Entire match: '%s'\n", matches[0])
+						fmt.Printf("%s: '%s'\n",tagRule.TagName,  matches[1])
+						// Add the extracted tag name to the additional details.
+						newAlert.AdditionalDetails[tagRule.TagName] = matches[1]
+					}
+				}
+			}
+		}
+		fmt.Println("The MATCH is ", res)
+	}
+	return true
 }
+
+func processGrouping(newAlert *models.DbAlert, mongoClient *mongo.Client) bool {
+	alertGroupCollection := mongoClient.Database(mongodatabase).Collection("alertgroups")
+	alertCollection := mongoClient.Database(mongodatabase).Collection("alerts")
+	findOptions := options.Find()
+    findOptions.SetSort(bson.D{{Key: "groupwindow", Value: 1}})
+	cursor, err := alertGroupCollection.Find(context.TODO(), bson.D{},findOptions)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer cursor.Close(context.TODO())
+
+	var alertGroupConfigs []models.DbAlertGroup
+
+	if err = cursor.All(context.TODO(), &alertGroupConfigs); err != nil {
+        log.Fatal(err)
+    }
+
+	for _, alertGroupConfig   := range alertGroupConfigs {
+
+		fmt.Println("The alertConfig is ", alertGroupConfig)
+		// check if the alertPattern matches with the incomming event.
+		if (patternFound(alertGroupConfig.GroupTags , maps.Keys( newAlert.AdditionalDetails))){
+			// pattern is found in the incomming event
+			// construct the identifier
+			groupidentifier := ""
+			for _, tag := range alertGroupConfig.GroupTags {
+				groupidentifier = groupidentifier + "--" + newAlert.AdditionalDetails[tag].(string)
+			}
+			// if there is an event in open state with the same identifier
+			fmt.Println("THE IDENTIFIER IS ", groupidentifier)
+			findOptions := options.Find()
+			//findOptions.(bson.D{{Key: "groupidentifier", Value: groupidentifier}, {Key: "alertstatus" ,Value: "OPEN"}})
+			cursor, err := alertCollection.Find(context.TODO(), bson.M{"groupidentifier": groupidentifier , "alertstatus" : "OPEN"},findOptions)
+			if err != nil {
+				log.Fatal(err)
+			}
+			defer cursor.Close(context.TODO())
+
+			var identifiedalerts []models.DbAlert
+
+			if err = cursor.All(context.TODO(), &identifiedalerts); err != nil {
+				log.Fatal(err)
+			}
+			//
+			fmt.Println("THE TIME IS ", newAlert.AlertFirstTime.Unix() )
+			if len(identifiedalerts) != 0 {
+				fmt.Println("************************** FOUND OPEN EVENTS*********************************")
+				idn := identifiedalerts[len(identifiedalerts)-1] 
+				// There are open alerts with the same identifier
+				if newAlert.AlertFirstTime.Unix() - idn.AlertFirstTime.Unix() <= int64(alertGroupConfig.GroupWindow) {
+					// grpupEvent present and active
+					fmt.Printf("Identifier %s is within duration %v \n", groupidentifier , alertGroupConfig.GroupWindow )
+					// add the alert ID to the GroupAlerts 
+					updatefilter := bson.M{"_id": idn.ID }
+
+
+
+					update := bson.D{
+						{Key: "$push", Value: bson.D{
+							{Key: "groupalerts", Value: newAlert.ID},
+						}},
+						// {Key: "$set", Value: bson.D{
+						// 	{Key: "parent", Value: true},
+
+						// }},
+					}
+				
+					updateResult , updateerr := alertCollection.UpdateOne(context.TODO(), updatefilter, update)
+					if updateerr != nil {
+						panic(err)
+					}
+					if updateResult.ModifiedCount > 0 {
+						fmt.Printf("Matched %v documents and updated %v documents.\n", updateResult.MatchedCount, updateResult.ModifiedCount)
+					}
+
+					// Update Grouped = true and GroupIncident ID for the alert,
+					updateOriginalAlertfilter := bson.M{"_id": newAlert.ID }
+
+					updateOriginal := bson.M{
+						"$set": bson.M{
+							"groupincidentid": idn.ID,
+							"grouped" : true,
+						},
+					}
+			
+					updateOriginalResult , updateerr := alertCollection.UpdateOne(context.TODO(), updateOriginalAlertfilter, updateOriginal)
+					if updateerr != nil {
+						panic(err)
+					}
+					if updateResult.ModifiedCount > 0 {
+						fmt.Printf("Matched %v documents and updated %v documents.\n", updateOriginalResult.MatchedCount, updateOriginalResult.ModifiedCount)
+					}
+					break
+				}else{ 
+					// create new spog event
+					copy := deepCopy(*newAlert)
+					copy.GroupIdentifier = groupidentifier
+					copy.AlertId = "grouped-"+groupidentifier
+					copy.GroupAlerts = append(copy.GroupAlerts, newAlert.ID)
+					copy.ID = primitive.ObjectID{}
+					// create a new parent alert
+	
+					insertResult , inserterr := alertCollection.InsertOne(context.TODO(), copy)
+					if inserterr != nil {
+						fmt.Println("Insert Error")
+						log.Fatal(inserterr)
+					}
+					fmt.Println("The insert result is ", *insertResult)
+					spogincidentId := insertResult.InsertedID.(primitive.ObjectID)
+					updatefilter := bson.M{"_id": newAlert.ID }
+	
+					update := bson.M{
+						"$set": bson.M{
+							"groupincidentid": spogincidentId,
+							"grouped" : true,
+						},
+					}
+				
+					updateResult , updateerr := alertCollection.UpdateOne(context.TODO(), updatefilter, update)
+					if updateerr != nil {
+						panic(err)
+					}
+					if updateResult.ModifiedCount > 0 {
+						fmt.Printf("Matched %v documents and updated %v documents.\n", updateResult.MatchedCount, updateResult.ModifiedCount)
+					}
+					break
+				}
+
+			}else{
+				// create new spog event
+				copy := deepCopy(*newAlert)
+				copy.GroupIdentifier = groupidentifier
+				copy.AlertId = "grouped-"+groupidentifier
+				copy.GroupAlerts = append(copy.GroupAlerts, newAlert.ID)
+				copy.ID = primitive.ObjectID{}
+				copy.Parent = true
+				// create a new parent alert
+
+				insertResult , inserterr := alertCollection.InsertOne(context.TODO(), copy)
+				if inserterr != nil {
+					fmt.Println("Insert Error")
+					log.Fatal(inserterr)
+				}
+				fmt.Println("The insert result is ", *insertResult)
+				spogincidentId := insertResult.InsertedID.(primitive.ObjectID)
+				updatefilter := bson.M{"_id": newAlert.ID }
+
+				update := bson.M{
+					"$set": bson.M{
+						"groupincidentid": spogincidentId,
+						"grouped" : true,
+					},
+				}
+			
+				updateResult , updateerr := alertCollection.UpdateOne(context.TODO(), updatefilter, update)
+				if updateerr != nil {
+					panic(err)
+				}
+				if updateResult.ModifiedCount > 0 {
+					fmt.Printf("Matched %v documents and updated %v documents.\n", updateResult.MatchedCount, updateResult.ModifiedCount)
+				}
+				break
+
+			}
+
+
+		}
+
+	}
+	return true
+}
+type Item struct {
+    ID primitive.ObjectID
+}
+
+func objectIdToString(id primitive.ObjectID) string {
+    return id.Hex()
+}
+
+func processNotifyRules(newAlert *models.DbAlert, mongoClient *mongo.Client) bool {
+
+	var rulesGroup ruleengine.RulesGroup
+	notifyRulesCollection := mongoClient.Database(mongodatabase).Collection("notifyrules")
+
+	cursor, err := notifyRulesCollection.Find(context.TODO(), bson.D{})
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer cursor.Close(context.TODO())
+
+	var notifyRules []models.DbNotifyRule
+	if err = cursor.All(context.TODO(), &notifyRules); err != nil {
+        log.Fatal(err)
+    }
+
+	for _, notifyRule   := range notifyRules {
+		fmt.Println("Rule is ", notifyRule)
+		err := json.Unmarshal([]byte(notifyRule.RuleObject), &rulesGroup)
+		if err != nil {
+			fmt.Println("Error in rule evaluation ", err)
+		}
+		var alertMap map[string]interface{}
+		err1 := mapstructure.Decode(newAlert, &alertMap)
+		if err1 != nil {
+			fmt.Println("ERROR : Unable to convert struct to map")
+		}
+		fmt.Println("THE ALERT MAP IS ", alertMap)
+		res := ruleengine.EvaluateRulesGroup(alertMap, rulesGroup)
+		fmt.Printf("The Notify rule %v MATCH is %v \n", notifyRule.RuleName , res)
+		if res {
+			// jsonTemplate := `{
+			// 	"entity": "{{.Entity}}",
+			// 	"alertsource": "{{.AlertSource}}"
+			// }`
+			jsonTemplate := notifyRule.PayLoad
+				
+			// Parse the template
+			tmpl, err := template.New("jsonTemplate").Funcs(template.FuncMap{
+				"objectIdToString": objectIdToString,
+			}).Parse(jsonTemplate)
+
+			if err != nil {
+				log.Fatalf("Error parsing template: %v", err)
+			}
+		
+			// Execute the template with the data
+			var tpl bytes.Buffer
+			if err := tmpl.Execute(&tpl, newAlert); err != nil {
+				fmt.Printf("Error executing template: %v \n", err)
+			}
+			
+			generatedJSON := tpl.String()
+			log.Printf("Generated JSON: %s", generatedJSON)
+
+			// Unmarshal the result into a map to verify the structure
+			var result map[string]interface{}
+			if err := json.Unmarshal(tpl.Bytes(), &result); err != nil {
+				log.Printf("Error unmarshalling JSON: %v\n", err)
+			}
+		
+			// Print the resulting object
+			log.Printf("Interpolated JSON object: %v\n", result)
+
+			jsonData, err := json.Marshal(result)
+			if err != nil {
+				log.Printf("Error marshalling JSON: %v\n", err)
+			}
+
+			response, err := http.Post(notifyRule.EndPoint, "application/json", bytes.NewBuffer(jsonData))
+			if err != nil {
+				log.Fatalf("Error making POST request: %v", err)
+			}
+			defer response.Body.Close()
+
+			body, err := ioutil.ReadAll(response.Body)
+			if err != nil {
+				log.Fatalf("Error reading response body: %v", err)
+			}
+
+    fmt.Println(string(body))
+
+		}
+		fmt.Println("The MATCH is ", res)
+	}
+	return true
+}
+
+
+
+
+func patternFound(array1, array2 []string) bool {
+	// Create a map to store elements of array2
+	elementMap := make(map[string]bool)
+	
+	// Populate the map with elements of array2
+	for _, element := range array2 {
+		elementMap[element] = true
+	}
+	
+	// Check if all elements of array1 are present in the map
+	for _, element := range array1 {
+		if !elementMap[element] {
+			return false
+		}
+	}
+	
+	return true
+}
+
+func deepCopy(original models.DbAlert) models.DbAlert {
+    copy := original
+
+    // Deep copy the map
+    copy.AdditionalDetails = make(map[string]interface{})
+    for k, v := range original.AdditionalDetails {
+        copy.AdditionalDetails[k] = v
+    }
+
+    return copy
+}
+
+
 
