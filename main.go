@@ -113,7 +113,7 @@ func main() {
 	fmt.Println("\x1b[32mPinged your deployment. You successfully connected to MongoDB!\x1b[0m\n ")
 	fmt.Println("\x1b[32mWaiting for alerts.....\x1b[0m\n")
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	go http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		Handler(w, r, mongoClient  )
 	 })
 	http.ListenAndServe(":8081", nil)
@@ -588,6 +588,7 @@ func objectIdToString(id primitive.ObjectID) string {
 }
 
 func processNotifyRules(newAlert *models.DbAlert, mongoClient *mongo.Client) bool {
+	const NoderedEndpoint = "http://192.168.1.201:1880/notifications"
 
 	var rulesGroup ruleengine.RulesGroup
 	notifyRulesCollection := mongoClient.Database(mongodatabase).Collection("notifyrules")
@@ -617,11 +618,8 @@ func processNotifyRules(newAlert *models.DbAlert, mongoClient *mongo.Client) boo
 		fmt.Println("THE ALERT MAP IS ", alertMap)
 		res := ruleengine.EvaluateRulesGroup(alertMap, rulesGroup)
 		fmt.Printf("The Notify rule %v MATCH is %v \n", notifyRule.RuleName , res)
+
 		if res {
-			// jsonTemplate := `{
-			// 	"entity": "{{.Entity}}",
-			// 	"alertsource": "{{.AlertSource}}"
-			// }`
 			jsonTemplate := notifyRule.PayLoad
 				
 			// Parse the template
@@ -651,24 +649,29 @@ func processNotifyRules(newAlert *models.DbAlert, mongoClient *mongo.Client) boo
 			// Print the resulting object
 			log.Printf("Interpolated JSON object: %v\n", result)
 
-			jsonData, err := json.Marshal(result)
+			// jsonData, err := json.Marshal(result)
+			// if err != nil {
+			// 	log.Printf("Error marshalling JSON: %v\n", err)
+			newAlert.AlertDestination = notifyRule.RuleName
+			// }
+			byteSlice, err := json.Marshal(newAlert)
 			if err != nil {
-				log.Printf("Error marshalling JSON: %v\n", err)
+				fmt.Println("Error:", err)
 			}
-
-			response, err := http.Post(notifyRule.EndPoint, "application/json", bytes.NewBuffer(jsonData))
+			fmt.Println(byteSlice)
+			response, err := http.Post(NoderedEndpoint, "application/json", bytes.NewBuffer(byteSlice))
 			if err != nil {
 				log.Fatalf("Error making POST request: %v", err)
 			}
 			defer response.Body.Close()
-
+			
+			fmt.Println("Here")
 			body, err := ioutil.ReadAll(response.Body)
 			if err != nil {
 				log.Fatalf("Error reading response body: %v", err)
 			}
 
-    fmt.Println(string(body))
-
+    		fmt.Println(string(body))
 		}
 		fmt.Println("The MATCH is ", res)
 	}
