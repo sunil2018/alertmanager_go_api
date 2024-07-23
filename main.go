@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -24,14 +25,18 @@ import (
 	"alertmanager/models"
 	"alertmanager/ruleengine"
 	"alertmanager/utilities"
-	"text/template"
 
 	"golang.org/x/exp/maps"
 )
 
-const mongouri = "mongodb://localhost:27017/api"
-const mongodatabase = "spog_development"
-const mongocollection = "alerts"
+// const mongouri = "mongodb://localhost:27017/api"
+// const mongodatabase = "spog_development"
+// const mongocollection = "alerts"
+
+var mongouri = os.Getenv("MONGO_URI")
+var mongodatabase = os.Getenv("MONGO_DB")
+var mongocollection = os.Getenv("MONGO_COLLECTION")
+var NoderedEndpoint = os.Getenv("NODERED_ENDPOINT")
 
 
 // Wrapper type around models.CustomTime
@@ -588,7 +593,7 @@ func objectIdToString(id primitive.ObjectID) string {
 }
 
 func processNotifyRules(newAlert *models.DbAlert, mongoClient *mongo.Client) bool {
-	const NoderedEndpoint = "http://192.168.1.201:1880/notifications"
+	//const NoderedEndpoint = "http://192.168.1.201:1880/notifications"
 
 	var rulesGroup ruleengine.RulesGroup
 	notifyRulesCollection := mongoClient.Database(mongodatabase).Collection("notifyrules")
@@ -620,40 +625,9 @@ func processNotifyRules(newAlert *models.DbAlert, mongoClient *mongo.Client) boo
 		fmt.Printf("The Notify rule %v MATCH is %v \n", notifyRule.RuleName , res)
 
 		if res {
-			jsonTemplate := notifyRule.PayLoad
-				
-			// Parse the template
-			tmpl, err := template.New("jsonTemplate").Funcs(template.FuncMap{
-				"objectIdToString": objectIdToString,
-			}).Parse(jsonTemplate)
 
-			if err != nil {
-				log.Fatalf("Error parsing template: %v", err)
-			}
-		
-			// Execute the template with the data
-			var tpl bytes.Buffer
-			if err := tmpl.Execute(&tpl, newAlert); err != nil {
-				fmt.Printf("Error executing template: %v \n", err)
-			}
-			
-			generatedJSON := tpl.String()
-			log.Printf("Generated JSON: %s", generatedJSON)
-
-			// Unmarshal the result into a map to verify the structure
-			var result map[string]interface{}
-			if err := json.Unmarshal(tpl.Bytes(), &result); err != nil {
-				log.Printf("Error unmarshalling JSON: %v\n", err)
-			}
-		
-			// Print the resulting object
-			log.Printf("Interpolated JSON object: %v\n", result)
-
-			// jsonData, err := json.Marshal(result)
-			// if err != nil {
-			// 	log.Printf("Error marshalling JSON: %v\n", err)
 			newAlert.AlertDestination = notifyRule.RuleName
-			// }
+
 			byteSlice, err := json.Marshal(newAlert)
 			if err != nil {
 				fmt.Println("Error:", err)
