@@ -4,10 +4,17 @@ pipeline {
     stages {
 
 
-        stage('build') {
+        stage('Build') {
             steps {
                 echo 'Startiong build'
                 sh '/usr/local/go/bin/go build main.go'
+            }
+        }
+
+        stage('Test') {
+            steps {
+                echo 'Checking existance of go binary'
+                sh 'test -f main'
             }
         }
     }
