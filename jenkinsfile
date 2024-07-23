@@ -3,7 +3,6 @@ pipeline {
 
     stages {
 
-
         stage('Build') {
             steps {
                 echo 'Startiong build'
@@ -17,5 +16,26 @@ pipeline {
                 sh 'test -f main'
             }
         }
+
+        stage('Deploy Stage') {
+            steps {
+                echo 'Deploying Stage'
+                sh 'test -f main'
+            }
+        }
+
+        stage('Approval') {
+            steps {
+                input message: 'Do you want to push to production?', ok: 'Yes I want'
+            }
+        }
+
+        stage('Deploy Prod') {
+            steps {
+                echo 'Deploying Prod'
+                sh 'test -f main'
+            }
+        }
+
     }
 }
