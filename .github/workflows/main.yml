@@ -22,7 +22,7 @@ jobs:
         go-version: '1.23'
 
     - name: Build
-      run: go build -v ./... -o alertapi
+      run: go build -o alertapi -v ./... 
 
     #- name: Test
     #  run: go test -v ./...
