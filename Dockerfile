@@ -17,7 +17,7 @@ COPY --from=build /app /app
 WORKDIR /app
 
 # Copy the pre-compiled Go binary into the container
-COPY alertapi /app/
+#COPY alertapi /app/
 
 # Make the binary executable
 RUN chmod +x /app/alertapi
