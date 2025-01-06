@@ -12,6 +12,15 @@ jobs:
     steps:
       - name: Check out the repo
         uses: actions/checkout@v3
+
+      - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.23'
+
+      - name: Build
+      run: go build -o alertapi -v
+      
       - name: Log in to Docker Hub
         uses: docker/login-action@v2
         with:
