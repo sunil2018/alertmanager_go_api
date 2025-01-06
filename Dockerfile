@@ -1,25 +1,17 @@
-FROM golang:1.22.3-alpine as build
+# Use the official Alpine Linux image
+FROM alpine:latest
 
-WORKDIR /app
+# Create a directory for the app (optional but good practice)
+RUN mkdir /app
 
-COPY go.mod go.sum main.go ./
-
-RUN go mod download
-
-RUN go build -o alertapi
-
-##############
-
-FROM alpine:3.20.3
-
-COPY --from=build /app /app
-
+# Set the working directory
 WORKDIR /app
 
 # Copy the pre-compiled Go binary into the container
-#COPY alertapi /app/
+COPY alertapi /app/
 
 # Make the binary executable
 RUN chmod +x /app/alertapi
 
-CMD [ "/app/gin-alertapi" ]
+# Set the entrypoint to your Go binary
+ENTRYPOINT ["/app/alertapi"]
